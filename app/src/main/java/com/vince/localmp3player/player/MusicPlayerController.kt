@@ -2,7 +2,6 @@ package com.vince.localmp3player.player
 
 import android.content.Context
 import android.net.Uri
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -26,6 +25,7 @@ enum class RepeatSetting {
 }
 
 data class PlayerUiState(
+    val currentItem: LibraryAudioItem? = null,
     val queue: List<LibraryAudioItem> = emptyList(),
     val currentIndex: Int = -1,
     val isPlaying: Boolean = false,
@@ -33,10 +33,7 @@ data class PlayerUiState(
     val durationMs: Long = 0L,
     val repeatSetting: RepeatSetting = RepeatSetting.ALL,
     val shuffleEnabled: Boolean = false,
-) {
-    val currentItem: LibraryAudioItem?
-        get() = queue.getOrNull(currentIndex)
-}
+)
 
 class MusicPlayerController(
     context: Context,
@@ -44,14 +41,26 @@ class MusicPlayerController(
     private val player = ExoPlayer.Builder(context.applicationContext).build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val _uiState = MutableStateFlow(PlayerUiState())
+    private var onTrackEnded: ((LibraryAudioItem) -> Unit)? = null
+
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
     init {
-        player.repeatMode = Player.REPEAT_MODE_ALL
+        player.repeatMode = Player.REPEAT_MODE_OFF
+        player.shuffleModeEnabled = false
         player.addListener(
             object : Player.Listener {
                 override fun onEvents(player: Player, events: Player.Events) {
                     publishState()
+                }
+
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    publishState()
+                    if (playbackState == Player.STATE_ENDED) {
+                        _uiState.value.currentItem?.let { endedItem ->
+                            onTrackEnded?.invoke(endedItem)
+                        }
+                    }
                 }
             },
         )
@@ -64,89 +73,88 @@ class MusicPlayerController(
         }
     }
 
-    fun playQueue(queue: List<LibraryAudioItem>, startIndex: Int) {
-        if (queue.isEmpty()) return
+    fun setOnTrackEndedListener(listener: (LibraryAudioItem) -> Unit) {
+        onTrackEnded = listener
+    }
 
-        val mediaItems = queue.map { item ->
-            MediaItem.Builder()
-                .setUri(Uri.parse(item.audioUri))
-                .setMediaMetadata(
-                    MediaMetadata.Builder()
-                        .setTitle(item.title)
-                        .build(),
-                )
-                .build()
-        }
+    fun playNow(item: LibraryAudioItem) {
+        playItem(item, _uiState.value.queue.indexOfFirst { queuedItem -> queuedItem.id == item.id })
+    }
 
-        player.setMediaItems(mediaItems, startIndex.coerceIn(0, queue.lastIndex), 0L)
-        player.prepare()
-        player.playWhenReady = true
-
-        _uiState.value = _uiState.value.copy(
-            queue = queue,
-            currentIndex = startIndex.coerceIn(0, queue.lastIndex),
-        )
+    fun enqueue(item: LibraryAudioItem) {
+        if (_uiState.value.queue.any { it.id == item.id }) return
+        _uiState.value = _uiState.value.copy(queue = _uiState.value.queue + item)
+        publishState()
     }
 
     fun togglePlayPause() {
-        if (_uiState.value.queue.isEmpty()) return
-        if (player.isPlaying) {
-            player.pause()
-        } else {
-            player.play()
+        val state = _uiState.value
+        when {
+            state.currentItem == null && state.queue.isNotEmpty() -> playFromQueue(0)
+            state.currentItem == null -> Unit
+            player.isPlaying -> player.pause()
+            else -> {
+                if (player.playbackState == Player.STATE_ENDED) {
+                    player.seekTo(0L)
+                }
+                player.play()
+            }
         }
         publishState()
     }
 
     fun seekTo(positionMs: Long) {
+        if (_uiState.value.currentItem == null) return
         player.seekTo(positionMs)
         publishState()
     }
 
     fun playFromQueue(index: Int) {
-        if (index !in _uiState.value.queue.indices) return
-        player.seekTo(index, 0L)
-        player.playWhenReady = true
-        publishState()
-    }
-
-    fun skipPrevious() {
-        val queue = _uiState.value.queue
-        if (queue.isEmpty()) return
-
-        val currentIndex = player.currentMediaItemIndex.takeIf { it != C.INDEX_UNSET } ?: 0
-        if (player.currentPosition > 3_000) {
-            player.seekTo(currentIndex, 0L)
-        } else {
-            val targetIndex = if (currentIndex <= 0) queue.lastIndex else currentIndex - 1
-            player.seekTo(targetIndex, 0L)
-        }
-        player.playWhenReady = true
-        publishState()
-    }
-
-    fun skipNext() {
-        val queue = _uiState.value.queue
-        if (queue.isEmpty()) return
-
-        val currentIndex = player.currentMediaItemIndex.takeIf { it != C.INDEX_UNSET } ?: 0
-        val targetIndex = if (currentIndex >= queue.lastIndex) 0 else currentIndex + 1
-        player.seekTo(targetIndex, 0L)
-        player.playWhenReady = true
-        publishState()
-    }
-
-    fun toggleShuffle() {
-        player.shuffleModeEnabled = !player.shuffleModeEnabled
-        publishState()
+        val item = _uiState.value.queue.getOrNull(index) ?: return
+        playItem(item, index)
     }
 
     fun cycleRepeatMode() {
-        player.repeatMode = when (player.repeatMode) {
-            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-            else -> Player.REPEAT_MODE_OFF
+        _uiState.value = _uiState.value.copy(
+            repeatSetting = when (_uiState.value.repeatSetting) {
+                RepeatSetting.OFF -> RepeatSetting.ALL
+                RepeatSetting.ALL -> RepeatSetting.ONE
+                RepeatSetting.ONE -> RepeatSetting.OFF
+            },
+        )
+    }
+
+    fun toggleShuffle() {
+        _uiState.value = _uiState.value.copy(shuffleEnabled = !_uiState.value.shuffleEnabled)
+    }
+
+    fun removeQueueItem(index: Int) {
+        val state = _uiState.value
+        if (index !in state.queue.indices) return
+
+        val updatedQueue = state.queue.toMutableList().apply { removeAt(index) }
+        val updatedCurrentIndex = when {
+            state.currentIndex == index -> -1
+            state.currentIndex > index -> state.currentIndex - 1
+            else -> state.currentIndex
         }
+
+        _uiState.value = state.copy(
+            queue = updatedQueue,
+            currentIndex = updatedCurrentIndex,
+        )
+        publishState()
+    }
+
+    fun replayCurrent() {
+        val currentItem = _uiState.value.currentItem ?: return
+        playItem(currentItem, _uiState.value.currentIndex)
+    }
+
+    fun stopAtStart() {
+        if (_uiState.value.currentItem == null) return
+        player.pause()
+        player.seekTo(0L)
         publishState()
     }
 
@@ -155,21 +163,34 @@ class MusicPlayerController(
         player.release()
     }
 
-    private fun publishState() {
-        val queue = _uiState.value.queue
-        val currentIndex = player.currentMediaItemIndex.takeIf { it != C.INDEX_UNSET } ?: -1
+    private fun playItem(item: LibraryAudioItem, queueIndex: Int) {
+        player.setMediaItem(mediaItemFrom(item))
+        player.prepare()
+        player.playWhenReady = true
         _uiState.value = _uiState.value.copy(
-            queue = queue,
-            currentIndex = currentIndex,
+            currentItem = item,
+            currentIndex = queueIndex,
+        )
+        publishState()
+    }
+
+    private fun publishState() {
+        val state = _uiState.value
+        _uiState.value = state.copy(
             isPlaying = player.isPlaying,
             positionMs = player.currentPosition.coerceAtLeast(0L),
-            durationMs = player.duration.takeIf { it > 0L } ?: 0L,
-            repeatSetting = when (player.repeatMode) {
-                Player.REPEAT_MODE_ONE -> RepeatSetting.ONE
-                Player.REPEAT_MODE_ALL -> RepeatSetting.ALL
-                else -> RepeatSetting.OFF
-            },
-            shuffleEnabled = player.shuffleModeEnabled,
+            durationMs = player.duration.takeIf { it > 0L } ?: state.currentItem?.durationMs ?: 0L,
         )
+    }
+
+    private fun mediaItemFrom(item: LibraryAudioItem): MediaItem {
+        return MediaItem.Builder()
+            .setUri(Uri.parse(item.audioUri))
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(item.title)
+                    .build(),
+            )
+            .build()
     }
 }

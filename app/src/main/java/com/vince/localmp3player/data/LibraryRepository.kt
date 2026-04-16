@@ -52,7 +52,6 @@ class LibraryRepository(
 
         val musicScan = musicFolders
             .map { scanCategory(it, LibrarySection.MUSIC) }
-            .filter { it.items.isNotEmpty() }
 
         val soundScan = when {
             soundContainer == null -> emptyList()
@@ -61,11 +60,9 @@ class LibraryRepository(
                     .filter { it.isDirectory }
                     .sortedByName()
                     .map { scanCategory(it, LibrarySection.SOUNDBOARD) }
-                    .filter { it.items.isNotEmpty() }
             }
             else -> {
                 listOf(scanCategory(soundContainer, LibrarySection.SOUNDBOARD))
-                    .filter { it.items.isNotEmpty() }
             }
         }
 
@@ -119,25 +116,77 @@ class LibraryRepository(
             return@withContext OperationResult(false, "Le nouveau nom est vide.")
         }
 
-        val audioDocument = item.audioUri.toSingleDocument() ?: return@withContext OperationResult(
+        if (newBaseName.equals(item.baseName, ignoreCase = true)) {
+            return@withContext OperationResult(true, "Le nom est deja a jour.", item.id)
+        }
+
+        val parentFolder = item.folderUri.toDocument() ?: return@withContext OperationResult(
+            false,
+            "Impossible d'acceder au dossier parent.",
+        )
+
+        val newAudioFileName = "$newBaseName.${item.audioExtension}"
+        val newImageFileName = item.imageExtension?.let { "$newBaseName.$it" }
+
+        val conflictingFile = parentFolder.listFiles().firstOrNull { document ->
+            val documentName = document.name.orEmpty()
+            val sameAudioName = documentName.equals(newAudioFileName, ignoreCase = true) &&
+                document.uri.toString() != item.audioUri
+            val sameImageName = !item.imageUri.isNullOrBlank() &&
+                !newImageFileName.isNullOrBlank() &&
+                documentName.equals(newImageFileName, ignoreCase = true) &&
+                document.uri.toString() != item.imageUri
+            sameAudioName || sameImageName
+        }
+        if (conflictingFile != null) {
+            return@withContext OperationResult(false, "Un fichier porte deja ce nom dans cette categorie.")
+        }
+
+        val audioSourceDocument = item.audioUri.toSingleDocument() ?: return@withContext OperationResult(
             false,
             "Impossible d'acceder au fichier audio.",
         )
-        val imageDocument = item.imageUri?.toSingleDocument()
+        val imageSourceDocument = item.imageUri?.toSingleDocument()
 
-        val audioRenamed = audioDocument.renameTo("$newBaseName.${item.audioExtension}")
-        if (!audioRenamed) {
-            return@withContext OperationResult(false, "Le renommage du fichier audio a echoue.")
+        val audioTargetUri = createDocument(
+            parentDocumentUri = Uri.parse(item.folderUri),
+            mimeType = guessAudioMime(item.audioExtension),
+            displayName = newAudioFileName,
+        ) ?: return@withContext OperationResult(false, "Impossible de creer le nouveau fichier audio.")
+
+        if (!copyUri(Uri.parse(item.audioUri), audioTargetUri)) {
+            DocumentFile.fromSingleUri(context, audioTargetUri)?.delete()
+            return@withContext OperationResult(false, "La copie du fichier audio a echoue.")
         }
 
-        if (imageDocument != null && item.imageExtension != null) {
-            imageDocument.renameTo("$newBaseName.${item.imageExtension}")
+        var imageTargetUri: Uri? = null
+        if (!item.imageUri.isNullOrBlank() && !item.imageExtension.isNullOrBlank() && !newImageFileName.isNullOrBlank()) {
+            imageTargetUri = createDocument(
+                parentDocumentUri = Uri.parse(item.folderUri),
+                mimeType = guessImageMime(item.imageExtension),
+                displayName = newImageFileName,
+            )
+
+            if (imageTargetUri == null || !copyUri(Uri.parse(item.imageUri), imageTargetUri)) {
+                DocumentFile.fromSingleUri(context, audioTargetUri)?.delete()
+                imageTargetUri?.let { DocumentFile.fromSingleUri(context, it)?.delete() }
+                return@withContext OperationResult(false, "La copie de l'image associee a echoue.")
+            }
+        }
+
+        val audioDeleted = audioSourceDocument.delete()
+        val imageDeleted = imageSourceDocument?.delete() ?: true
+
+        if (!audioDeleted || !imageDeleted) {
+            DocumentFile.fromSingleUri(context, audioTargetUri)?.delete()
+            imageTargetUri?.let { DocumentFile.fromSingleUri(context, it)?.delete() }
+            return@withContext OperationResult(false, "Le renommage n'a pas pu etre finalise proprement.")
         }
 
         OperationResult(
             success = true,
             message = "\"${item.title}\" a ete renomme.",
-            updatedTrackId = audioDocument.uri.toString(),
+            updatedTrackId = audioTargetUri.toString(),
         )
     }
 
@@ -189,6 +238,34 @@ class LibraryRepository(
             message = "\"${item.title}\" a ete deplace.",
             updatedTrackId = audioTargetUri.toString(),
         )
+    }
+
+    suspend fun deleteItemPair(
+        item: LibraryAudioItem,
+    ): OperationResult = withContext(Dispatchers.IO) {
+        val audioDeleted = item.audioUri.toSingleDocument()?.delete() == true
+        val imageDeleted = item.imageUri?.toSingleDocument()?.delete() ?: true
+
+        if (audioDeleted && imageDeleted) {
+            OperationResult(true, "\"${item.title}\" a ete supprime.")
+        } else {
+            OperationResult(false, "La suppression de \"${item.title}\" a echoue.")
+        }
+    }
+
+    suspend fun deleteCategory(
+        category: CategoryEntry,
+    ): OperationResult = withContext(Dispatchers.IO) {
+        val categoryFolder = category.folderUri.toDocument() ?: return@withContext OperationResult(
+            false,
+            "Impossible d'acceder a la categorie.",
+        )
+
+        if (deleteRecursively(categoryFolder)) {
+            OperationResult(true, "La categorie \"${category.name}\" a ete supprimee.")
+        } else {
+            OperationResult(false, "La suppression de la categorie \"${category.name}\" a echoue.")
+        }
     }
 
     suspend fun resolveRecordingFolderUri(
@@ -319,6 +396,12 @@ class LibraryRepository(
         return DocumentFile.fromSingleUri(context, Uri.parse(this))
     }
 
+    private fun String?.toDocument(): DocumentFile? {
+        if (this.isNullOrBlank()) return null
+        val uri = Uri.parse(this)
+        return DocumentFile.fromTreeUri(context, uri) ?: DocumentFile.fromSingleUri(context, uri)
+    }
+
     private fun Uri.readDurationMs(): Long? {
         return runCatching {
             val retriever = MediaMetadataRetriever()
@@ -369,6 +452,15 @@ class LibraryRepository(
 
     private fun DocumentFile.sameDocumentAs(other: DocumentFile?): Boolean {
         return other != null && uri == other.uri
+    }
+
+    private fun deleteRecursively(document: DocumentFile): Boolean {
+        val childrenDeleted = if (document.isDirectory) {
+            document.listFiles().all(::deleteRecursively)
+        } else {
+            true
+        }
+        return childrenDeleted && document.delete()
     }
 
     private fun Iterable<DocumentFile>.sortedByName(): List<DocumentFile> {

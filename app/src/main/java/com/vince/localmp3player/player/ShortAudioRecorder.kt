@@ -167,6 +167,6 @@ class ShortAudioRecorder(
     }
 
     companion object {
-        const val MAX_RECORDING_MS = 5_000
+        const val MAX_RECORDING_MS = 10 * 60 * 1000
     }
 }

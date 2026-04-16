@@ -24,6 +24,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
@@ -44,7 +46,6 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
-import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Widgets
 import androidx.compose.material3.AlertDialog
@@ -66,9 +67,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -127,6 +132,9 @@ private enum class AppRoute(val route: String) {
 private enum class ProtectedAction {
     PICK_ROOT_FOLDER,
     CHANGE_PARENT_PIN,
+    TOGGLE_SOUND_RECORDING,
+    DELETE_SELECTED_MUSIC_CATEGORY,
+    DELETE_SELECTED_SOUND_CATEGORY,
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -147,7 +155,11 @@ fun KidTunesApp(
     var createCategorySection by remember { mutableStateOf<LibrarySection?>(null) }
     var showQueueSheet by remember { mutableStateOf(false) }
     var showRecentSheet by remember { mutableStateOf(false) }
+    var showFavoritesSheet by remember { mutableStateOf(false) }
     var showPinChangeDialog by remember { mutableStateOf(false) }
+    var soundPadForActions by remember { mutableStateOf<LibraryAudioItem?>(null) }
+    var itemForDeletion by remember { mutableStateOf<LibraryAudioItem?>(null) }
+    var pendingRecordingEnabled by remember { mutableStateOf<Boolean?>(null) }
     var wasRecording by remember { mutableStateOf(false) }
 
     val rootPickerLauncher = rememberLauncherForActivityResult(
@@ -178,7 +190,7 @@ fun KidTunesApp(
 
     LaunchedEffect(recordingState.isRecording) {
         if (wasRecording && !recordingState.isRecording) {
-            viewModel.reloadLibrary()
+            viewModel.handleRecordingEnded()
         }
         wasRecording = recordingState.isRecording
     }
@@ -189,11 +201,26 @@ fun KidTunesApp(
         }
     }
 
+    val favoriteTracks = remember(uiState.favoriteIds, uiState.library.musicTracks) {
+        uiState.library.musicTracks.filter { track -> uiState.favoriteIds.contains(track.id) }
+    }
+
+    val pendingRecordedSound = remember(uiState.pendingRecordedSoundId, uiState.library.soundPads) {
+        uiState.pendingRecordedSoundId?.let { pendingId ->
+            uiState.library.soundPads.firstOrNull { it.id == pendingId }
+        }
+    }
+
     if (protectedAction != null) {
         PinDialog(
             title = "Code parent",
             subtitle = "Entre le code pour modifier les options sensibles.",
-            onDismiss = { protectedAction = null },
+            onDismiss = {
+                if (protectedAction == ProtectedAction.TOGGLE_SOUND_RECORDING) {
+                    pendingRecordingEnabled = null
+                }
+                protectedAction = null
+            },
             onValidate = { enteredPin ->
                 if (viewModel.verifyPin(enteredPin)) {
                     when (protectedAction) {
@@ -210,6 +237,26 @@ fun KidTunesApp(
 
                         ProtectedAction.CHANGE_PARENT_PIN -> {
                             showPinChangeDialog = true
+                            protectedAction = null
+                        }
+
+                        ProtectedAction.TOGGLE_SOUND_RECORDING -> {
+                            pendingRecordingEnabled?.let(viewModel::setSoundboardRecordingEnabled)
+                            pendingRecordingEnabled = null
+                            protectedAction = null
+                        }
+
+                        ProtectedAction.DELETE_SELECTED_MUSIC_CATEGORY -> {
+                            uiState.library.musicCategories
+                                .firstOrNull { it.id == uiState.selectedMusicCategoryId }
+                                ?.let(viewModel::deleteCategory)
+                            protectedAction = null
+                        }
+
+                        ProtectedAction.DELETE_SELECTED_SOUND_CATEGORY -> {
+                            uiState.library.soundCategories
+                                .firstOrNull { it.id == uiState.selectedSoundCategoryId }
+                                ?.let(viewModel::deleteCategory)
                             protectedAction = null
                         }
 
@@ -255,16 +302,28 @@ fun KidTunesApp(
         )
     }
 
-    if (trackForRename != null) {
+    val renameTarget = trackForRename ?: pendingRecordedSound
+
+    if (renameTarget != null) {
         TextEntryDialog(
-            title = "Renommer",
-            initialValue = trackForRename!!.baseName,
-            confirmLabel = "Appliquer",
+            title = if (pendingRecordedSound?.id == renameTarget.id) "Nommer le nouveau son" else "Renommer",
+            initialValue = renameTarget.baseName,
+            confirmLabel = if (pendingRecordedSound?.id == renameTarget.id) "Enregistrer" else "Appliquer",
             placeholder = "Nouveau nom",
-            onDismiss = { trackForRename = null },
+            onDismiss = {
+                if (pendingRecordedSound?.id == renameTarget.id) {
+                    viewModel.dismissPendingRecordedRename()
+                } else {
+                    trackForRename = null
+                }
+            },
             onConfirm = { newName ->
-                viewModel.renameTrack(trackForRename!!, newName)
-                trackForRename = null
+                viewModel.renameTrack(renameTarget, newName)
+                if (pendingRecordedSound?.id == renameTarget.id) {
+                    viewModel.dismissPendingRecordedRename()
+                } else {
+                    trackForRename = null
+                }
             },
         )
     }
@@ -290,6 +349,7 @@ fun KidTunesApp(
                     viewModel.playQueueIndex(it)
                     showQueueSheet = false
                 },
+                onRemoveIndex = viewModel::removeTrackFromQueue,
                 onFavoriteClick = viewModel::toggleFavorite,
             )
         }
@@ -301,9 +361,21 @@ fun KidTunesApp(
                 tracks = recentTracks,
                 favorites = uiState.favoriteIds,
                 onTrackClick = { track ->
-                    val categoryQueue = uiState.library.musicTracks.filter { it.categoryId == track.categoryId }
-                    viewModel.playTrack(track, categoryQueue.ifEmpty { listOf(track) })
+                    viewModel.playTrack(track)
                     showRecentSheet = false
+                },
+                onFavoriteClick = viewModel::toggleFavorite,
+            )
+        }
+    }
+
+    if (showFavoritesSheet) {
+        ModalBottomSheet(onDismissRequest = { showFavoritesSheet = false }) {
+            FavoritesSheet(
+                tracks = favoriteTracks,
+                onTrackClick = { track ->
+                    viewModel.playTrack(track)
+                    showFavoritesSheet = false
                 },
                 onFavoriteClick = viewModel::toggleFavorite,
             )
@@ -314,7 +386,6 @@ fun KidTunesApp(
         ModalBottomSheet(onDismissRequest = { trackForActions = null }) {
             TrackActionSheet(
                 item = trackForActions!!,
-                isFavorite = uiState.favoriteIds.contains(trackForActions!!.id),
                 onRename = {
                     trackForRename = trackForActions
                     trackForActions = null
@@ -323,12 +394,47 @@ fun KidTunesApp(
                     trackForMove = trackForActions
                     trackForActions = null
                 },
-                onFavorite = {
-                    viewModel.toggleFavorite(trackForActions!!)
-                    trackForActions = null
+            )
+        }
+    }
+
+    if (soundPadForActions != null) {
+        ModalBottomSheet(onDismissRequest = { soundPadForActions = null }) {
+            SoundPadActionSheet(
+                item = soundPadForActions!!,
+                onRename = {
+                    trackForRename = soundPadForActions
+                    soundPadForActions = null
+                },
+                onDelete = {
+                    itemForDeletion = soundPadForActions
+                    soundPadForActions = null
                 },
             )
         }
+    }
+
+    if (itemForDeletion != null) {
+        AlertDialog(
+            onDismissRequest = { itemForDeletion = null },
+            title = { Text("Supprimer") },
+            text = { Text("Supprimer \"${itemForDeletion!!.title}\" ?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteItem(itemForDeletion!!)
+                        itemForDeletion = null
+                    },
+                ) {
+                    Text("Supprimer")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { itemForDeletion = null }) {
+                    Text("Annuler")
+                }
+            },
+        )
     }
 
     Scaffold(
@@ -366,8 +472,10 @@ fun KidTunesApp(
             onMusicSearchChange = viewModel::setMusicSearch,
             onSoundSearchChange = viewModel::setSoundSearch,
             onTrackClick = viewModel::playTrack,
+            onEnqueueTrack = viewModel::enqueueTrack,
             onTrackLongPress = { trackForActions = it },
             onRecentClick = { showRecentSheet = true },
+            onFavoritesClick = { showFavoritesSheet = true },
             onFavoriteClick = viewModel::toggleFavorite,
             onPickRootFolder = {
                 if (uiState.settings.rootUri.isNullOrBlank()) {
@@ -377,9 +485,16 @@ fun KidTunesApp(
                 }
             },
             onCreateMusicCategory = { createCategorySection = LibrarySection.MUSIC },
+            onDeleteMusicCategory = { protectedAction = ProtectedAction.DELETE_SELECTED_MUSIC_CATEGORY },
             onCreateSoundCategory = { createCategorySection = LibrarySection.SOUNDBOARD },
+            onDeleteSoundCategory = { protectedAction = ProtectedAction.DELETE_SELECTED_SOUND_CATEGORY },
             onChangePin = { protectedAction = ProtectedAction.CHANGE_PARENT_PIN },
             onSoundClick = viewModel::playSoundEffect,
+            onSoundLongPress = { soundPadForActions = it },
+            onToggleSoundRecording = { enabled ->
+                pendingRecordingEnabled = enabled
+                protectedAction = ProtectedAction.TOGGLE_SOUND_RECORDING
+            },
             onRecordClick = {
                 if (recordingState.isRecording) {
                     viewModel.stopRecording()
@@ -404,15 +519,21 @@ private fun AppNavigator(
     onSelectSoundCategory: (String?) -> Unit,
     onMusicSearchChange: (String) -> Unit,
     onSoundSearchChange: (String) -> Unit,
-    onTrackClick: (LibraryAudioItem, List<LibraryAudioItem>) -> Unit,
+    onTrackClick: (LibraryAudioItem) -> Unit,
+    onEnqueueTrack: (LibraryAudioItem) -> Unit,
     onTrackLongPress: (LibraryAudioItem) -> Unit,
     onRecentClick: () -> Unit,
+    onFavoritesClick: () -> Unit,
     onFavoriteClick: (LibraryAudioItem) -> Unit,
     onPickRootFolder: () -> Unit,
     onCreateMusicCategory: () -> Unit,
+    onDeleteMusicCategory: () -> Unit,
     onCreateSoundCategory: () -> Unit,
+    onDeleteSoundCategory: () -> Unit,
     onChangePin: () -> Unit,
     onSoundClick: (LibraryAudioItem) -> Unit,
+    onSoundLongPress: (LibraryAudioItem) -> Unit,
+    onToggleSoundRecording: (Boolean) -> Unit,
     onRecordClick: () -> Unit,
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -445,10 +566,13 @@ private fun AppNavigator(
                 onSearchChange = onMusicSearchChange,
                 onCategoryClick = onSelectMusicCategory,
                 onTrackClick = onTrackClick,
+                onEnqueueTrack = onEnqueueTrack,
                 onTrackLongPress = onTrackLongPress,
                 onFavoriteClick = onFavoriteClick,
                 onOpenRecent = onRecentClick,
+                onOpenFavorites = onFavoritesClick,
                 onCreateCategory = onCreateMusicCategory,
+                onDeleteCategory = onDeleteMusicCategory,
                 isCurrentRoute = currentRoute == AppRoute.MUSIC.route,
             )
         }
@@ -457,12 +581,17 @@ private fun AppNavigator(
             SoundboardScreen(
                 uiState = uiState,
                 recordingState = recordingState,
-                onBack = onGoHome,
+                onBack = {
+                    if (uiState.selectedSoundCategoryId != null) onSelectSoundCategory(null) else onGoHome()
+                },
                 onHome = onGoHome,
                 onSearchChange = onSoundSearchChange,
                 onCategoryClick = onSelectSoundCategory,
                 onPlaySound = onSoundClick,
+                onLongPressSound = onSoundLongPress,
                 onCreateCategory = onCreateSoundCategory,
+                onDeleteCategory = onDeleteSoundCategory,
+                onToggleRecording = onToggleSoundRecording,
                 onRecordClick = onRecordClick,
             )
         }
@@ -486,9 +615,7 @@ private fun HomeScreen(
             title = "Accueil",
             accent = MeadowGreen,
             accentDark = MeadowGreenDark,
-            leading = {
-                IconBadge(icon = Icons.Rounded.Star, background = Butter)
-            },
+            leading = { Spacer(modifier = Modifier.size(46.dp)) },
             trailing = {
                 Box {
                     IconBadgeButton(
@@ -523,16 +650,7 @@ private fun HomeScreen(
 
         Spacer(modifier = Modifier.height(18.dp))
 
-        InfoBanner(
-            text = if (uiState.settings.rootUri.isNullOrBlank()) {
-                "Choisis un dossier racine une fois, puis l'application s'en souviendra au prochain lancement."
-            } else {
-                "Dossier racine memorise. Tu peux maintenant naviguer hors ligne entre musiques et boite a sons."
-            },
-        )
-
         if (uiState.settings.rootUri.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(10.dp))
             OutlinedButton(
                 onClick = onPickRootFolder,
                 modifier = Modifier.fillMaxWidth(),
@@ -565,14 +683,10 @@ private fun HomeScreen(
         )
 
         Spacer(modifier = Modifier.height(20.dp))
-
-        HomeStatsCard(uiState = uiState)
-
-        Spacer(modifier = Modifier.weight(1f))
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun MusicScreen(
     uiState: MainUiState,
@@ -580,11 +694,14 @@ private fun MusicScreen(
     onHome: () -> Unit,
     onSearchChange: (String) -> Unit,
     onCategoryClick: (String?) -> Unit,
-    onTrackClick: (LibraryAudioItem, List<LibraryAudioItem>) -> Unit,
+    onTrackClick: (LibraryAudioItem) -> Unit,
+    onEnqueueTrack: (LibraryAudioItem) -> Unit,
     onTrackLongPress: (LibraryAudioItem) -> Unit,
     onFavoriteClick: (LibraryAudioItem) -> Unit,
     onOpenRecent: () -> Unit,
+    onOpenFavorites: () -> Unit,
     onCreateCategory: () -> Unit,
+    onDeleteCategory: () -> Unit,
     isCurrentRoute: Boolean,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -639,6 +756,11 @@ private fun MusicScreen(
                         background = CardCream,
                         onClick = onOpenRecent,
                     )
+                    IconBadgeButton(
+                        icon = Icons.Rounded.Favorite,
+                        background = CardCream,
+                        onClick = onOpenFavorites,
+                    )
                     Box {
                         IconBadgeButton(
                             icon = Icons.Rounded.Settings,
@@ -657,6 +779,16 @@ private fun MusicScreen(
                                     onCreateCategory()
                                 },
                             )
+                            if (selectedCategory != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Supprimer cette categorie") },
+                                    leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onDeleteCategory()
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -668,7 +800,7 @@ private fun MusicScreen(
         SearchField(
             value = uiState.musicSearch,
             onValueChange = onSearchChange,
-            placeholder = "Chercher une musique ou une categorie",
+            placeholder = "Chercher une musique",
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -717,8 +849,16 @@ private fun MusicScreen(
                 if (visibleTracks.isEmpty()) {
                     EmptyStateCard(
                         icon = Icons.Rounded.Search,
-                        title = "Aucun resultat",
-                        body = "Essaie un autre mot-cle ou retourne a la liste des categories.",
+                        title = if (selectedCategory != null && uiState.musicSearch.isBlank()) {
+                            "Categorie vide"
+                        } else {
+                            "Aucun resultat"
+                        },
+                        body = if (selectedCategory != null && uiState.musicSearch.isBlank()) {
+                            "Cette categorie est vide pour le moment."
+                        } else {
+                            "Essaie un autre mot-cle ou retourne a la liste des categories."
+                        },
                     )
                 } else {
                     LazyColumn(
@@ -727,14 +867,18 @@ private fun MusicScreen(
                         contentPadding = PaddingValues(bottom = 24.dp),
                     ) {
                         items(visibleTracks, key = { it.id }) { track ->
-                            TrackRow(
-                                item = track,
-                                subtitle = if (selectedCategory == null) track.categoryName else formatDuration(track.durationMs),
-                                isFavorite = uiState.favoriteIds.contains(track.id),
-                                onClick = { onTrackClick(track, visibleTracks) },
-                                onLongPress = { onTrackLongPress(track) },
-                                onFavoriteClick = { onFavoriteClick(track) },
-                            )
+                            TrackQueueSwipeRow(
+                                onEnqueue = { onEnqueueTrack(track) },
+                            ) {
+                                TrackRow(
+                                    item = track,
+                                    subtitle = if (selectedCategory == null) track.categoryName else formatDuration(track.durationMs),
+                                    isFavorite = uiState.favoriteIds.contains(track.id),
+                                    onClick = { onTrackClick(track) },
+                                    onLongPress = { onTrackLongPress(track) },
+                                    onFavoriteClick = { onFavoriteClick(track) },
+                                )
+                            }
                         }
                     }
                 }
@@ -752,10 +896,14 @@ private fun SoundboardScreen(
     onSearchChange: (String) -> Unit,
     onCategoryClick: (String?) -> Unit,
     onPlaySound: (LibraryAudioItem) -> Unit,
+    onLongPressSound: (LibraryAudioItem) -> Unit,
     onCreateCategory: () -> Unit,
+    onDeleteCategory: () -> Unit,
+    onToggleRecording: (Boolean) -> Unit,
     onRecordClick: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val selectedCategory = uiState.library.soundCategories.firstOrNull { it.id == uiState.selectedSoundCategoryId }
     val visiblePads = remember(uiState.library.soundPads, uiState.soundSearch, uiState.selectedSoundCategoryId) {
         uiState.library.soundPads.filter { pad ->
             (uiState.selectedSoundCategoryId == null || pad.categoryId == uiState.selectedSoundCategoryId) &&
@@ -767,7 +915,7 @@ private fun SoundboardScreen(
         brush = Brush.verticalGradient(listOf(Color(0xFFEFF5FF), HoneyBackground)),
     ) {
         HeaderCard(
-            title = "Boite a sons",
+            title = selectedCategory?.name ?: "Boite a sons",
             accent = StoryBlue,
             accentDark = StoryBlueDark,
             leading = {
@@ -801,6 +949,33 @@ private fun SoundboardScreen(
                             onClick = {
                                 menuExpanded = false
                                 onCreateCategory()
+                            },
+                        )
+                        if (selectedCategory != null) {
+                            DropdownMenuItem(
+                                text = { Text("Supprimer cette categorie") },
+                                leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onDeleteCategory()
+                                },
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Autoriser l'enregistrement") },
+                            leadingIcon = { Icon(Icons.Rounded.Mic, contentDescription = null) },
+                            trailingIcon = {
+                                Switch(
+                                    checked = uiState.settings.soundboardRecordingEnabled,
+                                    onCheckedChange = { enabled ->
+                                        menuExpanded = false
+                                        onToggleRecording(enabled)
+                                    },
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onToggleRecording(!uiState.settings.soundboardRecordingEnabled)
                             },
                         )
                     }
@@ -859,17 +1034,19 @@ private fun SoundboardScreen(
                     SoundPad(
                         item = pad,
                         onClick = { onPlaySound(pad) },
+                        onLongPress = { onLongPressSound(pad) },
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
-
-        RecordButton(
-            recordingState = recordingState,
-            onClick = onRecordClick,
-        )
+        if (uiState.settings.soundboardRecordingEnabled) {
+            Spacer(modifier = Modifier.height(18.dp))
+            RecordButton(
+                recordingState = recordingState,
+                onClick = onRecordClick,
+            )
+        }
     }
 }
 
@@ -1162,6 +1339,55 @@ private fun CategoryTile(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TrackQueueSwipeRow(
+    onEnqueue: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.StartToEnd) {
+                onEnqueue()
+            }
+            false
+        },
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromEndToStart = false,
+        backgroundContent = {
+            val active = dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(if (active) MeadowGreen else MeadowGreen.copy(alpha = 0.35f))
+                    .padding(horizontal = 20.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.QueueMusic,
+                        contentDescription = null,
+                        tint = CardCream,
+                    )
+                    Text(
+                        text = "Ajouter a la file",
+                        color = CardCream,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+            }
+        },
+        content = { content() },
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TrackRow(
@@ -1219,10 +1445,12 @@ private fun TrackRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SoundPad(
     item: LibraryAudioItem,
     onClick: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     Card(
         shape = RoundedCornerShape(24.dp),
@@ -1230,7 +1458,10 @@ private fun SoundPad(
         border = androidx.compose.foundation.BorderStroke(2.dp, CardStroke),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongPress,
+            ),
     ) {
         Column(
             modifier = Modifier.padding(10.dp),
@@ -1269,11 +1500,7 @@ private fun RecordButton(
         Icon(Icons.Rounded.Mic, contentDescription = null)
         Spacer(modifier = Modifier.width(10.dp))
         Text(
-            text = if (recordingState.isRecording) {
-                "Stop (${recordingState.remainingMs / 1000}s)"
-            } else {
-                "Enregistrer"
-            },
+            text = if (recordingState.isRecording) "Stop" else "Enregistrer",
             style = MaterialTheme.typography.titleMedium,
         )
     }
@@ -1400,6 +1627,7 @@ private fun QueueSheet(
     playerState: PlayerUiState,
     favorites: Set<String>,
     onPlayIndex: (Int) -> Unit,
+    onRemoveIndex: (Int) -> Unit,
     onFavoriteClick: (LibraryAudioItem) -> Unit,
 ) {
     Column(
@@ -1412,13 +1640,14 @@ private fun QueueSheet(
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(playerState.queue.indices.toList()) { index ->
                 val item = playerState.queue[index]
-                TrackRow(
+                QueueTrackRow(
                     item = item,
                     subtitle = if (index == playerState.currentIndex) "Lecture en cours" else item.categoryName,
                     isFavorite = favorites.contains(item.id),
                     onClick = { onPlayIndex(index) },
-                    onLongPress = { },
                     onFavoriteClick = { onFavoriteClick(item) },
+                    onRemoveClick = { onRemoveIndex(index) },
+                    canRemove = index != playerState.currentIndex,
                 )
             }
         }
@@ -1463,12 +1692,46 @@ private fun RecentSheet(
 }
 
 @Composable
+private fun FavoritesSheet(
+    tracks: List<LibraryAudioItem>,
+    onTrackClick: (LibraryAudioItem) -> Unit,
+    onFavoriteClick: (LibraryAudioItem) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+    ) {
+        Text(text = "Musiques favorites", style = MaterialTheme.typography.headlineMedium)
+        Spacer(modifier = Modifier.height(12.dp))
+        if (tracks.isEmpty()) {
+            EmptyStateCard(
+                icon = Icons.Rounded.Favorite,
+                title = "Aucun favori",
+                body = "Ajoute des musiques en favoris pour les retrouver plus vite.",
+            )
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(tracks, key = { it.id }) { track ->
+                    TrackRow(
+                        item = track,
+                        subtitle = track.categoryName,
+                        isFavorite = true,
+                        onClick = { onTrackClick(track) },
+                        onLongPress = { },
+                        onFavoriteClick = { onFavoriteClick(track) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun TrackActionSheet(
     item: LibraryAudioItem,
-    isFavorite: Boolean,
     onRename: () -> Unit,
     onMove: () -> Unit,
-    onFavorite: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1479,11 +1742,24 @@ private fun TrackActionSheet(
         Text(text = item.title, style = MaterialTheme.typography.headlineMedium)
         ActionButton(label = "Renommer", icon = Icons.Rounded.Edit, onClick = onRename)
         ActionButton(label = "Deplacer", icon = Icons.Rounded.FolderOpen, onClick = onMove)
-        ActionButton(
-            label = if (isFavorite) "Retirer des favoris" else "Ajouter aux favoris",
-            icon = if (isFavorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-            onClick = onFavorite,
-        )
+    }
+}
+
+@Composable
+private fun SoundPadActionSheet(
+    item: LibraryAudioItem,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(text = item.title, style = MaterialTheme.typography.headlineMedium)
+        ActionButton(label = "Modifier le nom", icon = Icons.Rounded.Edit, onClick = onRename)
+        ActionButton(label = "Supprimer", icon = Icons.Rounded.Delete, onClick = onDelete)
     }
 }
 
@@ -1501,6 +1777,71 @@ private fun ActionButton(
         Icon(icon, contentDescription = null)
         Spacer(modifier = Modifier.width(10.dp))
         Text(label)
+    }
+}
+
+@Composable
+private fun QueueTrackRow(
+    item: LibraryAudioItem,
+    subtitle: String,
+    isFavorite: Boolean,
+    canRemove: Boolean,
+    onClick: () -> Unit,
+    onFavoriteClick: () -> Unit,
+    onRemoveClick: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(26.dp),
+        colors = CardDefaults.cardColors(containerColor = CardCream),
+        border = androidx.compose.foundation.BorderStroke(2.dp, CardStroke),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ArtworkBox(
+                imageUri = item.imageUri,
+                fallbackIcon = Icons.Rounded.MusicNote,
+                modifier = Modifier.size(76.dp),
+            )
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = SoftInk,
+                )
+            }
+            IconButton(onClick = onFavoriteClick) {
+                Icon(
+                    imageVector = if (isFavorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                    contentDescription = null,
+                    tint = if (isFavorite) SoundRed else SoftInk,
+                )
+            }
+            if (canRemove) {
+                IconButton(onClick = onRemoveClick) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Retirer de la file",
+                        tint = SoftInk,
+                    )
+                }
+            } else {
+                Spacer(modifier = Modifier.width(48.dp))
+            }
+        }
     }
 }
 

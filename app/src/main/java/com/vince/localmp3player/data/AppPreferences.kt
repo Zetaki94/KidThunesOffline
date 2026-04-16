@@ -3,6 +3,7 @@ package com.vince.localmp3player.data
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -34,6 +35,7 @@ class AppPreferences(
                 recentTrackIds = decodeList(preferences[recentsKey]),
                 lastMusicCategoryId = preferences[lastMusicCategoryKey]?.takeIf { it.isNotBlank() },
                 lastSoundCategoryId = preferences[lastSoundCategoryKey]?.takeIf { it.isNotBlank() },
+                soundboardRecordingEnabled = preferences[soundboardRecordingEnabledKey] ?: true,
             )
         }
 
@@ -108,6 +110,12 @@ class AppPreferences(
         }
     }
 
+    suspend fun setSoundboardRecordingEnabled(enabled: Boolean) {
+        context.appDataStore.edit { preferences ->
+            preferences[soundboardRecordingEnabledKey] = enabled
+        }
+    }
+
     private fun encodeList(values: List<String>): String {
         return values.joinToString(delimiter.toString())
     }
@@ -124,5 +132,6 @@ class AppPreferences(
         val recentsKey = stringPreferencesKey("recent_track_ids")
         val lastMusicCategoryKey = stringPreferencesKey("last_music_category_id")
         val lastSoundCategoryKey = stringPreferencesKey("last_sound_category_id")
+        val soundboardRecordingEnabledKey = booleanPreferencesKey("soundboard_recording_enabled")
     }
 }

@@ -47,6 +47,7 @@ data class AppSettings(
     val recentTrackIds: List<String> = emptyList(),
     val lastMusicCategoryId: String? = null,
     val lastSoundCategoryId: String? = null,
+    val soundboardRecordingEnabled: Boolean = true,
 )
 
 data class OperationResult(
