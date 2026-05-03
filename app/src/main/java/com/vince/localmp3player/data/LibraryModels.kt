@@ -5,6 +5,11 @@ enum class LibrarySection {
     SOUNDBOARD,
 }
 
+enum class AppAccessMode {
+    CHILD,
+    ADULT,
+}
+
 data class CategoryEntry(
     val id: String,
     val name: String,
@@ -45,9 +50,19 @@ data class AppSettings(
     val adminPin: String = DEFAULT_ADMIN_PIN,
     val favoriteTrackIds: Set<String> = emptySet(),
     val recentTrackIds: List<String> = emptyList(),
+    val requestedSongTitles: List<String> = emptyList(),
     val lastMusicCategoryId: String? = null,
     val lastSoundCategoryId: String? = null,
     val soundboardRecordingEnabled: Boolean = true,
+    val musicVolume: Float = DEFAULT_MUSIC_VOLUME,
+    val accessMode: AppAccessMode = AppAccessMode.CHILD,
+    val adultModeLocked: Boolean = true,
+    val interfaceScale: Float = DEFAULT_INTERFACE_SCALE,
+    val musicSectionVisible: Boolean = true,
+    val blindTestSectionVisible: Boolean = true,
+    val orchestraSectionVisible: Boolean = true,
+    val drawingSectionVisible: Boolean = true,
+    val soundboardSectionVisible: Boolean = true,
 )
 
 data class OperationResult(
@@ -57,3 +72,5 @@ data class OperationResult(
 )
 
 const val DEFAULT_ADMIN_PIN = "1234"
+const val DEFAULT_MUSIC_VOLUME = 0.85f
+const val DEFAULT_INTERFACE_SCALE = 1f

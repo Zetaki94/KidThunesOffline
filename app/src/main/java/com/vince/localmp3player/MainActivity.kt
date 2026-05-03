@@ -13,8 +13,12 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.vince.localmp3player.data.AppPreferences
 import com.vince.localmp3player.data.LibraryRepository
 import com.vince.localmp3player.player.MusicPlayerController
+import com.vince.localmp3player.player.DrumSoundEngine
+import com.vince.localmp3player.player.PianoSoundEngine
+import com.vince.localmp3player.player.PreviewAudioController
 import com.vince.localmp3player.player.ShortAudioRecorder
 import com.vince.localmp3player.player.SoundEffectPlayer
+import com.vince.localmp3player.player.XylophoneSoundEngine
 import com.vince.localmp3player.ui.KidTunesApp
 import com.vince.localmp3player.ui.theme.KidTunesTheme
 
@@ -27,6 +31,10 @@ class MainActivity : ComponentActivity() {
             playerController = MusicPlayerController(applicationContext),
             soundEffectPlayer = SoundEffectPlayer(applicationContext),
             recorder = ShortAudioRecorder(applicationContext),
+            blindTestPlayer = PreviewAudioController(applicationContext),
+            pianoSoundEngine = PianoSoundEngine(applicationContext),
+            drumSoundEngine = DrumSoundEngine(applicationContext),
+            xylophoneSoundEngine = XylophoneSoundEngine(applicationContext),
         )
     }
 

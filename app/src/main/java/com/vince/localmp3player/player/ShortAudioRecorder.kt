@@ -25,7 +25,7 @@ import java.util.Locale
 
 data class RecordingUiState(
     val isRecording: Boolean = false,
-    val remainingMs: Int = ShortAudioRecorder.MAX_RECORDING_MS,
+    val elapsedMs: Int = 0,
     val outputUri: String? = null,
 )
 
@@ -73,7 +73,7 @@ class ShortAudioRecorder(
         outputFileDescriptor = fileDescriptor
         _state.value = RecordingUiState(
             isRecording = true,
-            remainingMs = MAX_RECORDING_MS,
+            elapsedMs = 0,
             outputUri = outputDocumentUri.toString(),
         )
         startTimer()
@@ -143,11 +143,11 @@ class ShortAudioRecorder(
     private fun startTimer() {
         timerJob?.cancel()
         timerJob = scope.launch {
-            var remaining = MAX_RECORDING_MS
-            while (isActive && recorder != null && remaining >= 0) {
-                _state.value = _state.value.copy(remainingMs = remaining)
+            var elapsed = 0
+            while (isActive && recorder != null && elapsed <= MAX_RECORDING_MS) {
+                _state.value = _state.value.copy(elapsedMs = elapsed)
                 delay(100)
-                remaining -= 100
+                elapsed += 100
             }
         }
     }

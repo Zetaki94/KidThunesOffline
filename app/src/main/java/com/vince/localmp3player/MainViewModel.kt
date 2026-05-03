@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.vince.localmp3player.data.AppAccessMode
 import com.vince.localmp3player.data.AppPreferences
 import com.vince.localmp3player.data.AppSettings
 import com.vince.localmp3player.data.CategoryEntry
@@ -11,17 +12,52 @@ import com.vince.localmp3player.data.LibraryAudioItem
 import com.vince.localmp3player.data.LibraryRepository
 import com.vince.localmp3player.data.LibrarySection
 import com.vince.localmp3player.data.LibrarySnapshot
+import com.vince.localmp3player.player.DrumSoundEngine
 import com.vince.localmp3player.player.MusicPlayerController
+import com.vince.localmp3player.player.PianoSoundEngine
 import com.vince.localmp3player.player.PlayerUiState
+import com.vince.localmp3player.player.PreviewAudioController
 import com.vince.localmp3player.player.RecordingUiState
+import com.vince.localmp3player.player.RepeatSetting
 import com.vince.localmp3player.player.ShortAudioRecorder
 import com.vince.localmp3player.player.SoundEffectPlayer
+import com.vince.localmp3player.player.XylophoneSoundEngine
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.random.Random
+
+enum class BlindTestPhase {
+    IDLE,
+    NOT_ENOUGH_TRACKS,
+    COUNTDOWN,
+    PLAYING,
+    ANSWERING,
+    REVEAL,
+    FINISHED,
+}
+
+private const val BLIND_TEST_ROUNDS = 10
+
+data class BlindTestUiState(
+    val phase: BlindTestPhase = BlindTestPhase.IDLE,
+    val roundNumber: Int = 0,
+    val totalRounds: Int = BLIND_TEST_ROUNDS,
+    val countdownSeconds: Int = 3,
+    val secondsLeft: Int = 0,
+    val score: Int = 0,
+    val currentTrackId: String? = null,
+    val options: List<LibraryAudioItem> = emptyList(),
+    val selectedAnswerId: String? = null,
+    val revealedCorrectTrackId: String? = null,
+    val feedbackText: String? = null,
+)
 
 data class MainUiState(
     val settings: AppSettings = AppSettings(),
@@ -33,9 +69,12 @@ data class MainUiState(
     val selectedSoundCategoryId: String? = null,
     val message: String? = null,
     val pendingRecordedSoundId: String? = null,
+    val blindTest: BlindTestUiState = BlindTestUiState(),
 ) {
     val favoriteIds: Set<String> = settings.favoriteTrackIds
     val recentIds: List<String> = settings.recentTrackIds
+    val requestedSongTitles: List<String> = settings.requestedSongTitles
+    val isAdultMode: Boolean = settings.accessMode == AppAccessMode.ADULT
 }
 
 class MainViewModel(
@@ -44,6 +83,10 @@ class MainViewModel(
     private val playerController: MusicPlayerController,
     private val soundEffectPlayer: SoundEffectPlayer,
     private val recorder: ShortAudioRecorder,
+    private val blindTestPlayer: PreviewAudioController,
+    private val pianoSoundEngine: PianoSoundEngine,
+    private val drumSoundEngine: DrumSoundEngine,
+    private val xylophoneSoundEngine: XylophoneSoundEngine,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MainUiState())
@@ -53,6 +96,10 @@ class MainViewModel(
 
     private var lastObservedRootUri: String? = null
     private var currentRecordingOutputId: String? = null
+    private var blindTestJob: Job? = null
+    private var blindTestAnswer: CompletableDeferred<String?>? = null
+    private var blindTestSkipPlayback: CompletableDeferred<Unit>? = null
+    private var shouldResumeMusicAfterBlindTest = false
 
     init {
         playerController.setOnTrackEndedListener(::handleTrackCompletion)
@@ -65,7 +112,7 @@ class MainViewModel(
                 repository.persistRootPermission(uri, flags)
                 preferences.setRootUri(uri.toString())
             }.onFailure {
-                postMessage("Le dossier racine n'a pas pu etre memorise.")
+                postMessage("Le dossier racine n'a pas pu être mémorisé.")
             }
         }
     }
@@ -98,7 +145,7 @@ class MainViewModel(
 
     fun enqueueTrack(track: LibraryAudioItem) {
         playerController.enqueue(track)
-        postMessage("\"${track.title}\" ajoutee a la file d'attente.")
+        postMessage("\"${track.title}\" a été ajoutée à la file d'attente.")
     }
 
     fun togglePlayPause() = playerController.togglePlayPause()
@@ -152,6 +199,18 @@ class MainViewModel(
 
     fun playSoundEffect(item: LibraryAudioItem) {
         soundEffectPlayer.play(item.audioUri)
+    }
+
+    fun playPianoNote(noteIndex: Int) {
+        pianoSoundEngine.play(noteIndex)
+    }
+
+    fun playDrumPad(padIndex: Int) {
+        drumSoundEngine.play(padIndex)
+    }
+
+    fun playXylophoneNote(noteIndex: Int) {
+        xylophoneSoundEngine.play(noteIndex)
     }
 
     fun toggleFavorite(item: LibraryAudioItem) {
@@ -220,7 +279,7 @@ class MainViewModel(
                 return@launch
             }
             preferences.setAdminPin(safePin)
-            postMessage("Le code parent a ete mis a jour.")
+            postMessage("Le code parent a été mis à jour.")
         }
     }
 
@@ -230,13 +289,70 @@ class MainViewModel(
         }
     }
 
+    fun setAccessMode(mode: AppAccessMode) {
+        viewModelScope.launch {
+            preferences.setAccessMode(mode)
+        }
+    }
+
+    fun setAdultModeLocked(locked: Boolean) {
+        viewModelScope.launch {
+            preferences.setAdultModeLocked(locked)
+        }
+    }
+
+    fun setInterfaceScale(scale: Float) {
+        viewModelScope.launch {
+            preferences.setInterfaceScale(scale)
+        }
+    }
+
+    fun requestSong(title: String) {
+        viewModelScope.launch {
+            val cleanTitle = title.trim()
+            if (cleanTitle.isBlank()) {
+                postMessage("Le nom de la musique est vide.")
+                return@launch
+            }
+            preferences.addRequestedSong(cleanTitle)
+            postMessage("Demande ajoutée : $cleanTitle")
+        }
+    }
+
+    fun removeRequestedSong(title: String) {
+        viewModelScope.launch {
+            preferences.removeRequestedSong(title)
+            postMessage("Demande supprimée : $title")
+        }
+    }
+
+    fun setMusicSectionVisible(visible: Boolean) {
+        viewModelScope.launch { preferences.setMusicSectionVisible(visible) }
+    }
+
+    fun setBlindTestSectionVisible(visible: Boolean) {
+        viewModelScope.launch { preferences.setBlindTestSectionVisible(visible) }
+    }
+
+    fun setOrchestraSectionVisible(visible: Boolean) {
+        viewModelScope.launch { preferences.setOrchestraSectionVisible(visible) }
+    }
+
+    fun setDrawingSectionVisible(visible: Boolean) {
+        viewModelScope.launch { preferences.setDrawingSectionVisible(visible) }
+    }
+
+    fun setSoundboardSectionVisible(visible: Boolean) {
+        viewModelScope.launch { preferences.setSoundboardSectionVisible(visible) }
+    }
+
     fun verifyPin(pin: String): Boolean {
         return pin.trim() == _uiState.value.settings.adminPin
     }
 
     fun startRecording(preferredCategoryFolderUri: String?) {
         if (!_uiState.value.settings.soundboardRecordingEnabled) {
-            postMessage("L'enregistrement est desactive dans les parametres.")
+            postMessage("L'enregistrement est désactivé dans les paramètres.")
             return
         }
 
@@ -247,14 +363,14 @@ class MainViewModel(
             )
 
             if (folderUri == null) {
-                postMessage("Choisis d'abord un dossier racine ou une categorie de sons.")
+                postMessage("Choisis d'abord un dossier racine ou une catégorie de sons.")
                 return@launch
             }
 
             recorder.startRecording(folderUri)
                 .onSuccess { outputId ->
                     currentRecordingOutputId = outputId
-                    postMessage("Enregistrement lance.")
+                    postMessage("Enregistrement lancé.")
                 }
                 .onFailure {
                     postMessage("Impossible de lancer l'enregistrement.")
@@ -266,10 +382,10 @@ class MainViewModel(
         viewModelScope.launch {
             recorder.stopRecording()
                 .onSuccess {
-                    postMessage("Son enregistre.")
+                    postMessage("Son enregistré.")
                 }
                 .onFailure {
-                    postMessage("L'enregistrement a echoue.")
+                    postMessage("L'enregistrement a échoué.")
                 }
         }
     }
@@ -280,6 +396,162 @@ class MainViewModel(
         reloadLibrary(targetSoundId)
     }
 
+    fun startBlindTest() {
+        blindTestJob?.cancel()
+        blindTestAnswer?.cancel()
+        blindTestSkipPlayback?.cancel()
+        blindTestPlayer.stop()
+
+        val tracks = _uiState.value.library.musicTracks.distinctBy { it.id }
+        if (tracks.size < 4) {
+            _uiState.value = _uiState.value.copy(
+                blindTest = BlindTestUiState(
+                    phase = BlindTestPhase.NOT_ENOUGH_TRACKS,
+                    feedbackText = "Ajoute au moins 4 musiques pour lancer un blind test.",
+                ),
+            )
+            return
+        }
+
+        val isFreshBlindTestSession = _uiState.value.blindTest.phase == BlindTestPhase.IDLE ||
+            _uiState.value.blindTest.phase == BlindTestPhase.NOT_ENOUGH_TRACKS
+        if (isFreshBlindTestSession) {
+            shouldResumeMusicAfterBlindTest = playerState.value.isPlaying
+            if (shouldResumeMusicAfterBlindTest) {
+                playerController.pausePlayback()
+            }
+        }
+
+        val rounds = buildBlindTestRounds(tracks)
+        blindTestJob = viewModelScope.launch {
+            var score = 0
+            try {
+                rounds.forEachIndexed { index, track ->
+                    val roundNumber = index + 1
+                    blindTestPlayer.play(
+                        uriString = track.audioUri,
+                        startPositionMs = resolveBlindTestExcerptStart(track),
+                    )
+                    val skipDeferred = CompletableDeferred<Unit>()
+                    blindTestSkipPlayback = skipDeferred
+                    val playbackCountdownJob = viewModelScope.launch {
+                        for (seconds in 20 downTo 1) {
+                            _uiState.value = _uiState.value.copy(
+                                blindTest = BlindTestUiState(
+                                    phase = BlindTestPhase.PLAYING,
+                                    roundNumber = roundNumber,
+                                    score = score,
+                                    secondsLeft = seconds,
+                                    currentTrackId = track.id,
+                                ),
+                            )
+                            delay(1_000)
+                        }
+                    }
+                    withTimeoutOrNull(20_000) {
+                        skipDeferred.await()
+                    }
+                    playbackCountdownJob.cancel()
+                    blindTestSkipPlayback = null
+                    blindTestPlayer.fadeOutAndStop()
+
+                    val options = buildBlindTestOptions(correctTrack = track, allTracks = tracks)
+                    val answerDeferred = CompletableDeferred<String?>()
+                    blindTestAnswer = answerDeferred
+                    _uiState.value = _uiState.value.copy(
+                        blindTest = BlindTestUiState(
+                            phase = BlindTestPhase.ANSWERING,
+                            roundNumber = roundNumber,
+                            score = score,
+                            secondsLeft = 10,
+                            currentTrackId = track.id,
+                            options = options,
+                        ),
+                    )
+
+                    val countdownJob = viewModelScope.launch {
+                        for (seconds in 10 downTo 1) {
+                            val current = _uiState.value.blindTest
+                            _uiState.value = _uiState.value.copy(
+                                blindTest = current.copy(secondsLeft = seconds),
+                            )
+                            delay(1_000)
+                        }
+                    }
+
+                    val selectedAnswer = withTimeoutOrNull(10_000) {
+                        answerDeferred.await()
+                    }
+                    countdownJob.cancel()
+
+                    blindTestAnswer = null
+                    val isCorrect = selectedAnswer == track.id
+                    if (isCorrect) {
+                        score += 1
+                    }
+
+                    _uiState.value = _uiState.value.copy(
+                        blindTest = BlindTestUiState(
+                            phase = BlindTestPhase.REVEAL,
+                            roundNumber = roundNumber,
+                            score = score,
+                            currentTrackId = track.id,
+                            options = options,
+                            selectedAnswerId = selectedAnswer,
+                            revealedCorrectTrackId = track.id,
+                            feedbackText = if (isCorrect) {
+                                "Bonne réponse !"
+                            } else {
+                                "La bonne réponse était : ${track.title}"
+                            },
+                        ),
+                    )
+                    delay(2_000)
+                }
+
+                _uiState.value = _uiState.value.copy(
+                    blindTest = BlindTestUiState(
+                        phase = BlindTestPhase.FINISHED,
+                        score = score,
+                        totalRounds = BLIND_TEST_ROUNDS,
+                        feedbackText = "Score final : $score/$BLIND_TEST_ROUNDS",
+                    ),
+                )
+            } finally {
+                blindTestPlayer.stop()
+                blindTestAnswer = null
+                blindTestSkipPlayback = null
+            }
+        }
+    }
+
+    fun submitBlindTestAnswer(trackId: String) {
+        val currentState = _uiState.value.blindTest
+        if (currentState.phase != BlindTestPhase.ANSWERING || currentState.selectedAnswerId != null) return
+
+        _uiState.value = _uiState.value.copy(
+            blindTest = currentState.copy(selectedAnswerId = trackId),
+        )
+        blindTestAnswer?.complete(trackId)
+    }
+
+    fun skipBlindTestPlayback() {
+        if (_uiState.value.blindTest.phase == BlindTestPhase.PLAYING) {
+            blindTestSkipPlayback?.complete(Unit)
+        }
+    }
+
+    fun stopBlindTest() {
+        blindTestJob?.cancel()
+        blindTestAnswer?.cancel()
+        blindTestSkipPlayback?.cancel()
+        blindTestAnswer = null
+        blindTestSkipPlayback = null
+        blindTestPlayer.stop()
+        _uiState.value = _uiState.value.copy(blindTest = BlindTestUiState())
+        restoreMusicAfterBlindTest()
+    }
+
     fun consumeMessage() {
         _uiState.value = _uiState.value.copy(message = null)
     }
@@ -288,9 +560,14 @@ class MainViewModel(
         _uiState.value = _uiState.value.copy(pendingRecordedSoundId = null)
     }
 
-    fun reloadLibrary(pendingRecordedSoundId: String? = _uiState.value.pendingRecordedSoundId) {
+    fun reloadLibrary(
+        pendingRecordedSoundId: String? = _uiState.value.pendingRecordedSoundId,
+        showLoading: Boolean = true,
+    ) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true)
+            if (showLoading) {
+                _uiState.value = _uiState.value.copy(isLoading = true)
+            }
             val snapshot = repository.scanLibrary(_uiState.value.settings.rootUri)
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
@@ -306,15 +583,26 @@ class MainViewModel(
     }
 
     override fun onCleared() {
+        blindTestJob?.cancel()
+        blindTestAnswer?.cancel()
+        blindTestSkipPlayback?.cancel()
         playerController.release()
         soundEffectPlayer.release()
         recorder.release()
+        blindTestPlayer.release()
+        pianoSoundEngine.release()
+        drumSoundEngine.release()
+        xylophoneSoundEngine.release()
         super.onCleared()
     }
 
     private fun observePreferences() {
         viewModelScope.launch {
             preferences.settingsFlow.collectLatest { settings ->
+                playerController.setVolume(1f)
+                blindTestPlayer.setVolume(1f)
+                pianoSoundEngine.setVolume(1f)
+
                 val previousState = _uiState.value
                 _uiState.value = previousState.copy(
                     settings = settings,
@@ -324,7 +612,18 @@ class MainViewModel(
 
                 if (settings.rootUri != lastObservedRootUri) {
                     lastObservedRootUri = settings.rootUri
-                    reloadLibrary()
+                    val cachedSnapshot = repository.loadCachedLibrary(settings.rootUri)
+                    if (cachedSnapshot != null) {
+                        _uiState.value = _uiState.value.copy(
+                            isLoading = false,
+                            library = cachedSnapshot,
+                            selectedMusicCategoryId = _uiState.value.selectedMusicCategoryId
+                                ?.takeIf { selectedId -> cachedSnapshot.musicCategories.any { it.id == selectedId } },
+                            selectedSoundCategoryId = _uiState.value.selectedSoundCategoryId
+                                ?.takeIf { selectedId -> cachedSnapshot.soundCategories.any { it.id == selectedId } },
+                        )
+                    }
+                    reloadLibrary(showLoading = cachedSnapshot == null)
                 } else {
                     _uiState.value = _uiState.value.copy(isLoading = false)
                 }
@@ -344,21 +643,22 @@ class MainViewModel(
     }
 
     private fun handleTrackCompletion(completedItem: LibraryAudioItem) {
-        when {
-            playerState.value.repeatSetting == com.vince.localmp3player.player.RepeatSetting.ONE -> {
+        when (playerState.value.repeatSetting) {
+            RepeatSetting.ONE -> {
                 playerController.replayCurrent()
             }
 
-            playerState.value.shuffleEnabled -> {
-                resolveRandomTrack(excludingId = completedItem.id)?.let(::playTrackInternal)
-                    ?: playerController.stopAtStart()
-            }
-
             else -> {
+                if (playerState.value.shuffleEnabled) {
+                    resolveRandomTrack(excludingId = completedItem.id)?.let(::playTrackInternal)
+                        ?: playerController.stopAtStart()
+                    return
+                }
+
                 val nextTrack = resolveNextTrackInCategory(completedItem)
                 if (nextTrack != null) {
                     playTrackInternal(nextTrack)
-                } else if (playerState.value.repeatSetting == com.vince.localmp3player.player.RepeatSetting.ALL) {
+                } else if (playerState.value.repeatSetting == RepeatSetting.ALL) {
                     resolveFirstTrackInCategory(completedItem)?.let(::playTrackInternal)
                         ?: playerController.stopAtStart()
                 } else {
@@ -413,6 +713,40 @@ class MainViewModel(
         return candidates[Random.nextInt(candidates.size)]
     }
 
+    private fun buildBlindTestRounds(tracks: List<LibraryAudioItem>): List<LibraryAudioItem> {
+        return if (tracks.size >= BLIND_TEST_ROUNDS) {
+            tracks.shuffled().take(BLIND_TEST_ROUNDS)
+        } else {
+            List(BLIND_TEST_ROUNDS) { tracks.random() }
+        }
+    }
+
+    private fun buildBlindTestOptions(
+        correctTrack: LibraryAudioItem,
+        allTracks: List<LibraryAudioItem>,
+    ): List<LibraryAudioItem> {
+        val distractors = allTracks
+            .filterNot { it.id == correctTrack.id }
+            .shuffled()
+            .take(3)
+        return (distractors + correctTrack).shuffled()
+    }
+
+    private fun resolveBlindTestExcerptStart(track: LibraryAudioItem): Long {
+        val durationMs = track.durationMs ?: return 0L
+        val excerptLengthMs = 20_000L
+        if (durationMs <= excerptLengthMs + 3_000L) return 0L
+        val maxStart = (durationMs - excerptLengthMs).coerceAtLeast(0L)
+        return Random.nextLong(from = 0L, until = maxStart)
+    }
+
+    private fun restoreMusicAfterBlindTest() {
+        if (shouldResumeMusicAfterBlindTest) {
+            playerController.resumePlayback()
+        }
+        shouldResumeMusicAfterBlindTest = false
+    }
+
     companion object {
         fun factory(
             preferences: AppPreferences,
@@ -420,6 +754,10 @@ class MainViewModel(
             playerController: MusicPlayerController,
             soundEffectPlayer: SoundEffectPlayer,
             recorder: ShortAudioRecorder,
+            blindTestPlayer: PreviewAudioController,
+            pianoSoundEngine: PianoSoundEngine,
+            drumSoundEngine: DrumSoundEngine,
+            xylophoneSoundEngine: XylophoneSoundEngine,
         ): ViewModelProvider.Factory {
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
@@ -430,6 +768,10 @@ class MainViewModel(
                         playerController = playerController,
                         soundEffectPlayer = soundEffectPlayer,
                         recorder = recorder,
+                        blindTestPlayer = blindTestPlayer,
+                        pianoSoundEngine = pianoSoundEngine,
+                        drumSoundEngine = drumSoundEngine,
+                        xylophoneSoundEngine = xylophoneSoundEngine,
                     ) as T
                 }
             }

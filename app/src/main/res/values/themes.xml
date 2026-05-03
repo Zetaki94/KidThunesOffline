@@ -3,7 +3,7 @@
     <style name="Theme.LocalMp3Player" parent="Theme.Material3.Light.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@color/kid_background</item>
-        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
         <item name="colorPrimary">@color/kid_green</item>
         <item name="colorSecondary">@color/kid_blue</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>

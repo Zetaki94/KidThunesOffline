@@ -109,6 +109,25 @@ class MusicPlayerController(
         publishState()
     }
 
+    fun pausePlayback() {
+        if (_uiState.value.currentItem == null) return
+        player.pause()
+        publishState()
+    }
+
+    fun resumePlayback() {
+        if (_uiState.value.currentItem == null) return
+        if (player.playbackState == Player.STATE_ENDED) {
+            player.seekTo(0L)
+        }
+        player.play()
+        publishState()
+    }
+
+    fun setVolume(volume: Float) {
+        player.volume = volume.coerceIn(0f, 1f)
+    }
+
     fun playFromQueue(index: Int) {
         val item = _uiState.value.queue.getOrNull(index) ?: return
         playItem(item, index)
